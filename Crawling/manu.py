@@ -9,6 +9,17 @@ from selenium.common.exceptions import TimeoutException
 BASE_DIR = Path(r"C:\Users\output")  # 저장 폴더
 BASE_DIR.mkdir(parents=True, exist_ok=True) # 상위 폴더 있으면 Go 없으면 만들기
 
+names = [
+    "돈미화로 방학동점",
+    "목구멍 방학점",
+    "고기굽는베베",
+    "와우 솥뚜껑삼겹살",
+    "방학동고추장삼겹살",
+    "싹쓰리솥뚜껑김치삼겹살 방학점",
+    "싸전갈비",
+    "갈비둥지",
+]
+
 # 유니코드 문자열 정규화
 # 즉, 문자열의 유니코드 형태를 통일해서 정규식 필터링이 깨지지 않게 함
 def slugify(s: str) -> str:
@@ -156,17 +167,20 @@ def collect_menus(max_rounds=5):
         price = None
         signature = False
 
+        # 메뉴 이름 가져오기
         name_els = li.find_elements(By.XPATH, ".//span[contains(@class,'lPzHi')][normalize-space()]") or \
                    li.find_elements(By.XPATH, ".//div[contains(@class,'yQlqY')]//span[normalize-space()]")
         if name_els: name = name_els[0].text.strip()
 
+        # 가격 가져오기
         ems = li.find_elements(By.XPATH, ".//em")
         price_text = ems[0].text.strip() if ems and ems[0].text.strip() else li.text
-        m = re.search(r'(\d[\d,]*)', price_text or '')
-        price = int(m.group(1).replace(',', '')) if m else None
+        m = re.search(r'(\d[\d,]*)', price_text or '') # 숫자만 추출 ex) $12,000 → 12,000
+        price = int(m.group(1).replace(',', '')) if m else None # 쉼표 제거후 숫자만 저장
 
+        # 대표 텍스트 포함시 대표 메뉴로 표시
         if li.find_elements(By.XPATH, ".//*[contains(@class,'place_blind') and contains(.,'대표')]"):
-            signature = True
+            signature = True # T/F 로 표기기
 
         if name or price is not None:
             out.append({
@@ -177,9 +191,11 @@ def collect_menus(max_rounds=5):
             })
     return out
 
+# 가게명으로 검색→상세 진입→메뉴만 수집→CSV 저장
 def crawl_menus_for_store(store_name: str):
-    """가게명으로 검색→상세 진입→메뉴만 수집→CSV 저장"""
+    # 가게 검색 후 상세페이지 열기
     open_entry_by_search(store_name)
+    # 메뉴 수집 (최대 스크롤 6번)
     menus = collect_menus(max_rounds=6)
 
     # 파일 저장
@@ -188,8 +204,9 @@ def crawl_menus_for_store(store_name: str):
     out_path = BASE_DIR / f"{slug}_menus_{ts}.csv"
     pd.DataFrame(menus).to_csv(out_path, index=False, encoding="utf-8-sig")
 
-    print(f"🍽️ {store_name} 메뉴 {len(menus)}개 수집 → {out_path}")
-    # 앞에서처럼 프린트 미리보기
+    print(f" {store_name} 메뉴 {len(menus)}개 수집 → {out_path}")
+    
+    # 최대 8개 미리보기
     for i, m in enumerate(menus[:8], 1):
         print(f"{i}. {m['menu_name']} | {m['price_text']} | 대표:{'Y' if m['signature'] else ''}")
     return menus
@@ -199,4 +216,4 @@ for n in names:
         crawl_menus_for_store(n)
         time.sleep(0.8)  # 너무 빠르면 실패하니 숨고르기
     except Exception as e:
-        print("❌ 실패:", n, e)
+        print("실패:", n, e)
