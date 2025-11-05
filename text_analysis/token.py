@@ -7,6 +7,28 @@ from datetime import datetime
 BASE_DIR = Path(r"D:/reviews")  # 파일 경로
 TS = datetime.now().strftime("%Y%m%d_%H%M%S") # 중복 방지를 위한 파일명 뒤에 날짜/시간
 
+# STOP/강조어/부정어 정의
+STOP_BASE = set("""
+은 는 이 가 을 를 에 에서 으로 로 와 과 도 만 까지 부터 의 에게 께서 한테 
+하고 하다 있다 없다 되다 이다 아니다 같다 다르다 크다 작다 좋다 나쁘다
+그리고 그러나 그래서 그런데 하지만 또한 또는 그냥 좀 아주 진짜 정말 매우 너무
+요즘 오늘 어제 내일 이번 지난 다음 또 다시 계속 항상 가끔 때때로 자주
+것 수 때 곳 점 개 명 원 시간 분 일 월 년 번째 정도 약 
+""".split())
+
+# 감성분석에서 쓸 예정인 강조어/부정어(→ TF-IDF STOP에서는 제외)
+INTENSIFIERS = {
+    '너무','정말','진짜','완전','매우','아주','엄청','진심',
+    '최고로','극도로','극','되게','엄청나','완전히','정말로'
+}
+NEGATIONS = {
+    '안','못','않','아니','아니다','전혀','절대','별로','그닥','덜','없다',
+    '않다','아니야','아닌','아니었','아니에요','아니네요','아닙니다'
+}
+
+# 최종 TF-IDF용 STOP (강조/부정 신호는 남기기)
+STOP = (STOP_BASE - INTENSIFIERS - NEGATIONS)
+
 # 리뷰 파일 합치기 (유니온)
 # 데이터 불러오기
 paths = sorted(glob.glob(str(BASE_DIR / "*_new_reviews*.csv")))
@@ -58,112 +80,107 @@ def norm_count(x):
 # 텍스트 정규화
 raw["review_text"] = raw["review_text"].map(normalize_text)
 
-# 날짜 정규화: datetime으로 파싱 후 '일(date)' 단위만 사용
+# 날짜 정규화
 raw["visit_date"] = raw["visit_date"].map(norm_date)
 
-# 방문횟수 정규화: 숫자만 추출, pandas nullable 정수형(Int64)로 보관
+# 방문횟수 정규화
 raw["visit_count"] = raw["visit_count"].map(norm_count).astype("Int64")
 
-# ===== 4) 중복 제거 (가게+텍스트+방문일+방문횟수 조합 기준) =====
+# 중복 제거 (가게+텍스트+방문일+방문횟수) 
 raw = (raw
        .drop_duplicates(subset=["place_name", "review_text", "visit_date", "visit_count"])
        .reset_index(drop=True))
 
-# 3) 토큰화(kiwipiepy 있으면 사용, 없으면 정규식 폴백) + 불용어 제거
+# 토큰화 + 불용어 제거
 try:
+    # kiwipiepy : 한국어 형태소 분석기 라이브러리
     from kiwipiepy import Kiwi
     kiwi = Kiwi()
     def tokenize(text):
         toks=[]
         for t in kiwi.tokenize(text, normalize_coda=True):
+            # t.form : 표면형 (ex) 갔다 t.lemma : 기본형 (ex) 가다
+            # t.lemma가 있으면 기본형으로 없으면 표면형으로
             lemma = t.form if t.lemma is None else t.lemma
+
+            # 순수 한글/영문/숫자로만 이루어진 단어 필터링
             if re.fullmatch(r"[가-힣A-Za-z0-9]+", lemma):
                 toks.append(lemma)
         return toks
-    TOKENIZER = "kiwipiepy"
+    TOKENIZER = "kiwipiepy" # kiwi 사용
+
+# kiwi가 없을때
 except Exception:
     def tokenize(text):
-        text = re.sub(r"http\S+|www\.\S+", " ", text)
-        text = re.sub(r"[^가-힣A-Za-z0-9\s]", " ", text)
-        toks = [w for w in re.split(r"\s+", text) if w]
+        text = re.sub(r"http\S+|www\.\S+", " ", text) # http, www로 시작하는 문자열 제거 → url 처리리
+        text = re.sub(r"[^가-힣A-Za-z0-9\s]", " ", text) # 특수문자 제거
+        toks = [w for w in re.split(r"\s+", text) if w] # 공백으로 분리 → 빈 문자열 제거
         return toks
-    TOKENIZER = "regex"
+    TOKENIZER = "regex" # 정규식 기반
 
-# 간단 불용어(원하면 계속 추가)
-# 불용어 리스트 보강
-STOP = set("""
-은 는 이 가 을 를 에 에서 으로 로 와 과 도 만 까지 부터 의 에게 께서 한테 
-하고 하다 있다 없다 되다 이다 아니다 같다 다르다 크다 작다 좋다 나쁘다
-그리고 그러나 그래서 그런데 하지만 또한 또는 그냥 좀 아주 진짜 정말 매우 너무
-요즘 오늘 어제 내일 이번 지난 다음 또 다시 계속 항상 가끔 때때로 자주
-것 수 때 곳 점 개 명 원 시간 분 일 월 년 번째 정도 약 
-""".split())
-
-# 토큰 정제 함수 개선
-def clean_tokens(toks):
+ 
+# TF_IDF용, 감성분석용 따로 만들기
+# TF_IDF용
+def clean_tokens_for_tfidf(toks):
+    """불용어 제거 O, 조사/어미 일부 정리"""
     out = []
     for w in toks:
-        # 조사 제거 (더 포괄적으로)
         w2 = re.sub(r"(은|는|이|가|을|를|에|에서|으로|로|와|과|도|만|까지|부터|의|께서|한테|에게)$", "", w)
-        
-        # 어미 제거 (일부)
         w2 = re.sub(r"(습니다|세요|어요|아요|해요|지요|네요|예요|이에요)$", "", w2)
-        
-        if not w2 or w2 in STOP or len(w2) < 2:  # 2글자 미만 제거
+        if not w2 or len(w2) < 2:              # 2글자 미만 제거
             continue
-            
-        # 숫자만 있는 토큰 제거
-        if re.fullmatch(r"\d+", w2):
+        if w2 in STOP:                          # 불용어 제거
             continue
-            
+        if re.fullmatch(r"\d+", w2):            # 숫자만 제거
+            continue
         out.append(w2)
     return out
 
-raw["tokens"] = raw["review_text"].apply(lambda s: clean_tokens(tokenize(s)))
+# 감성분석용
+def clean_tokens_for_sentiment(toks):
+    # 불용어 제거 X (강조/부정/대비 신호 살리기)
+    out = []
+    for w in toks:
+        w2 = re.sub(r"(은|는|이|가|을|를|에|에서|으로|로|와|과|도|만|까지|부터|의|께서|한테|에게)$", "", w)
+        if not w2:
+            continue
+        out.append(w2)
+    return out
 
-# 인덱스 리셋 후 번호 매기기
+ssert all(c in raw.columns for c in ["place_name","visit_date","visit_count","review_text"])
+
+# 기본 토큰화
 raw = raw.reset_index(drop=True)
-raw["review_number"] = raw.index + 1
+raw["review_number"] = raw.index + 1 # 리뷰 번호
+raw["tokens_raw"] = raw["review_text"].apply(tokenize) # 토큰화 진행
 
-# BASE_DIR = "D:/SY 업무/기타/개인과제/리뷰/raw_data"
-# 4) 저장(마스터 원문 + 토큰)
-out_master = BASE_DIR / f"reviews_master_{TS}.csv"
-raw[["place_name","visit_date","visit_count","review_text","tokens"]].to_csv(out_master, index=False, encoding="utf-8-sig")
+# TF-IDF용
+raw["tokens_tfidf"] = raw["tokens_raw"].apply(clean_tokens_for_tfidf)
+tmp_tfidf = raw[["place_name","review_number","visit_date","visit_count","tokens_tfidf"]].copy()
+tmp_tfidf["tokens_join"] = tmp_tfidf["tokens_tfidf"].apply(lambda x: " ".join(x))
 
-out_tokens = BASE_DIR / f"reviews_master_tokens_{TS}.csv"
-# 토큰은 공백-조인 문자열도 같이 저장해두면 TF-IDF 바로 가능
-tmp = raw.copy()
-tmp["tokens_join"] = tmp["tokens"].apply(lambda x: " ".join(x))
-tmp[["place_name","review_number","visit_date","visit_count","tokens_join"]].to_csv(out_tokens, index=False, encoding="utf-8-sig")
+# 감성분석용
+raw["tokens_sent"] = raw["tokens_raw"].apply(clean_tokens_for_sentiment)
+tmp_sent = raw[["place_name","review_number","visit_date","visit_count","tokens_sent"]].copy()
+tmp_sent["tokens_join"] = tmp_sent["tokens_sent"].apply(lambda x: " ".join(x))
 
+# 저장
+out_tfidf = BASE_DIR / f"reviews_tokens_tfidf_{TS}.csv"
+out_sent  = BASE_DIR / f"reviews_tokens_sentiment_{TS}.csv"
 
+tmp_tfidf.to_csv(out_tfidf, index=False, encoding="utf-8-sig")
+tmp_sent.to_csv(out_sent, index=False, encoding="utf-8-sig")
 
-print("💾 저장:", out_master.name, "|", out_tokens.name)
-print("토큰화 방식:", TOKENIZER)
-# 데이터 현황 파악
-print("=== 데이터 현황 ===")
-print(f"총 리뷰 수: {len(raw):,}")
-print(f"가게 수: {raw['place_name'].nunique()}")
-print(f"가게별 리뷰 수:\n{raw['place_name'].value_counts().head(10)}")
-
-# 토큰 현황
-all_tokens = [token for tokens in raw['tokens'] for token in tokens]
-print(f"\n총 토큰 수: {len(all_tokens):,}")
-print(f"유니크 토큰 수: {len(set(all_tokens)):,}")
-
-# 빈도 높은 토큰 확인 (불용어 추가 제거 필요한지 체크)
-from collections import Counter
-token_freq = Counter(all_tokens)
-print(f"\n상위 토큰 30개:\n{token_freq.most_common(30)}")
-
-
-# ====== 아래 코드만 추가 ======
-
+# 추가 데이터 (도구설명용)
 import ast
-import pandas as pd
-df = raw.copy()
 
-# tokens 문자열을 리스트로 변환
+df_long = raw.copy()
+
+# tokens_tfidf 사용
+# 방문일자에 보이는 도구설명으로 감성분석에 씌이는 데이터가 아님
+df_long["tokens"] = df_long["tokens_tfidf"]
+
+# 안전하게 문자열→리스트 변환 (혹시 문자열일 경우 대비)
 def to_list_safe(x):
     if isinstance(x, list):
         return x
@@ -172,20 +189,24 @@ def to_list_safe(x):
     except Exception:
         return []
 
-df['tokens'] = df['tokens'].apply(to_list_safe)
+df_long["tokens"] = df_long["tokens"].apply(to_list_safe)
 
-# tokens를 행으로 분리
-long_df = df.explode('tokens', ignore_index=True)
+# 토큰을 행 단위로 펼치기
+long_df = df_long.explode("tokens", ignore_index=True)
 
-# 필요 컬럼만 선택 (place_name, visit_date, tokens)
-long_df = long_df[['place_name', 'review_number','visit_date', 'tokens']].rename(columns={'tokens': 'token'})
+# 필요한 컬럼만 정리
+long_df = long_df[["place_name","review_number","visit_date","tokens"]].rename(columns={"tokens":"token"})
 
 # 빈 값 제거
-long_df = long_df[long_df['token'].notna() & (long_df['token'] != '')]
+long_df = long_df[long_df["token"].notna() & (long_df["token"] != "")]
 
-# CSV 파일로 저장
-output_path = BASE_DIR / f"_tokens_long{TS}.csv"
-long_df.to_csv(output_path, index=False, encoding='utf-8-sig')
+# 저장
+out_long = BASE_DIR / f"reviews_tokens_long_{TS}.csv"
+long_df.to_csv(out_long, index=False, encoding="utf-8-sig")
 
-print(f"저장 완료 ✅ → {output_path}")
+print("저장 완료")
+print(f" - TF-IDF dataset:    {out_tfidf}")
+print(f" - Sentiment dataset: {out_sent}")
+print(f" - Long-format tokens: {out_long}")
+print(f"Tokenizer used: {TOKENIZER}")
 
